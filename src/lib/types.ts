@@ -61,11 +61,8 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   qaCompletionsPath: "v1/completions",
   qaReasoningEffort: "high",
   qaPromptTemplate:
-    "You are helping me find information from my bookmarks.\n" +
-    "Answer only using the bookmark context below.\n" +
-    "If the context is insufficient, say you cannot find the answer in indexed bookmarks.\n\n" +
-    "Context:\n{{context}}\n\n" +
-    "User question:\n{{question}}",
+    "You are helping me find my bookmarks of {{question}}.\n" +
+    "In the answer, make the source as a url of the bookmark you found.",
 };
 
 /** Per-bookmark index state for incremental updates */
