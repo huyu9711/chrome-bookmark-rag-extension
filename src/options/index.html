@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bookmark RAG — Options</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <h1>Bookmark RAG Manager</h1>
+      <p class="lead">
+        Embeddings for indexing; Q&amp;A defaults to <strong>NVIDIA</strong>
+        <code>POST …/v1/responses</code> with <code>input</code> + <code>reasoning</code>. Keys stay local.
+      </p>
+
+      <section class="card">
+        <h2>Embeddings (index)</h2>
+        <p class="hint">
+          Provider root URL only — the extension calls
+          <code>POST {base}/{embeddings path}</code> with
+          <code>{ "model", "input": [...] }</code> (same as OpenAI embeddings).
+          Example base: <code>https://integrate.api.nvidia.com/v1</code> or your NIM URL; if the host
+          already ends with <code>/v1</code>, set the path below to <code>embeddings</code> only.
+        </p>
+        <label>Base URL</label>
+        <input type="url" id="ragBaseUrl" autocomplete="off" placeholder="https://…" />
+
+        <label>API key</label>
+        <input type="password" id="ragApiKey" autocomplete="off" />
+
+        <label>Embedding model</label>
+        <input type="text" id="ragModel" autocomplete="off" placeholder="nvidia/nv-embedqa-e5-v5" />
+
+        <details class="details">
+          <summary>Embeddings path (optional)</summary>
+          <p class="hint small">Default: <code>v1/embeddings</code>. Use <code>embeddings</code> if your base URL already includes <code>/v1</code>.</p>
+          <label>Path</label>
+          <input type="text" id="ragEmbedPath" autocomplete="off" placeholder="v1/embeddings" />
+          <label>Chunk size (chars)</label>
+          <input type="number" id="ragChunkSize" min="200" step="1" placeholder="3000" />
+          <label>Chunk overlap (chars)</label>
+          <input type="number" id="ragChunkOverlap" min="0" step="1" placeholder="50" />
+          <label>Max page text (chars)</label>
+          <input type="number" id="ragTextMaxChars" min="200" step="1" placeholder="1000" />
+          <label>Embeddings timeout (seconds)</label>
+          <input type="number" id="ragEmbeddingsTimeoutSec" min="5" step="1" placeholder="60" />
+          <label>Embeddings timeout retries</label>
+          <input type="number" id="ragEmbeddingsRetryMax" min="0" step="1" placeholder="2" />
+        </details>
+
+        <div class="test-row">
+          <button type="button" id="test-rag" class="btn secondary">Test embeddings</button>
+          <span id="rag-test-status" class="test-status" role="status"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Q&amp;A (LLM)</h2>
+        <p class="hint">
+          <strong>Responses (NVIDIA)</strong> — <code>POST …/v1/responses</code> with
+          <code>{ "model", "input": "…", "reasoning": { "effort": "…" } }</code> (matches NVIDIA inference API).
+          Optional: legacy <strong>Chat</strong> or <strong>Text completions</strong>.
+        </p>
+
+        <label>API style</label>
+        <select id="qaMode">
+          <option value="responses">Responses (NVIDIA v1/responses)</option>
+          <option value="chat">Chat completions (v1/chat/completions)</option>
+          <option value="completions">Text completions (v1/completions)</option>
+        </select>
+
+        <label>Reasoning effort (v1/responses only)</label>
+        <select id="qaReasoningEffort">
+          <option value="high">high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+          <option value="none">omit (no reasoning object)</option>
+        </select>
+
+        <label>Base URL</label>
+        <input type="url" id="qaBaseUrl" autocomplete="off" placeholder="https://…" />
+
+        <label>API key</label>
+        <input type="password" id="qaApiKey" autocomplete="off" />
+
+        <label>Model</label>
+        <input type="text" id="qaModel" autocomplete="off" placeholder="openai/openai/gpt-5.1-codex" />
+
+        <details class="details">
+          <summary>Paths (optional)</summary>
+          <p class="hint small">
+            Defaults: <code>v1/responses</code>, <code>v1/chat/completions</code>, <code>v1/completions</code>.
+          </p>
+          <label>Responses path</label>
+          <input type="text" id="qaResponsesPath" autocomplete="off" placeholder="v1/responses" />
+          <label>Chat path</label>
+          <input type="text" id="qaChatPath" autocomplete="off" placeholder="v1/chat/completions" />
+          <label>Completions path</label>
+          <input type="text" id="qaCompletionsPath" autocomplete="off" placeholder="v1/completions" />
+        </details>
+
+        <details class="details">
+          <summary>Prompt template (local RAG)</summary>
+          <p class="hint small">
+            Default prompt already assumes bookmark search. Placeholders:
+            <code>{{context}}</code> and <code>{{question}}</code> (or <code>{{query}}</code>).
+          </p>
+          <label>Prompt template</label>
+          <textarea id="qaPromptTemplate" rows="8" placeholder="Use {{context}} and {{question}}"></textarea>
+        </details>
+
+        <div class="test-row">
+          <button type="button" id="test-qa" class="btn secondary">Test Q&amp;A</button>
+          <span id="qa-test-status" class="test-status" role="status"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Keyboard shortcut</h2>
+        <p>
+          Default: <strong>Ctrl+B</strong> (Windows/Linux) or <strong>Command+B</strong> (macOS).
+        </p>
+        <p>
+          To change it, open
+          <a id="shortcuts-link" href="#">Chrome extension shortcuts</a>.
+        </p>
+        <ul id="shortcut-list" class="shortcuts"></ul>
+      </section>
+
+      <div class="actions">
+        <button type="button" id="save" class="btn primary">Save</button>
+        <button type="button" id="export-settings" class="btn">Export settings</button>
+        <button type="button" id="import-settings" class="btn">Import settings</button>
+        <button type="button" id="download-settings" class="btn">Download JSON</button>
+        <button type="button" id="upload-settings" class="btn">Upload JSON</button>
+        <input type="file" id="import-file" class="visually-hidden" accept="application/json" />
+        <span id="status" class="status" role="status"></span>
+      </div>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

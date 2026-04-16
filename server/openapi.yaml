@@ -1,0 +1,52 @@
+# Extension uses OpenAI-compatible HTTP APIs (NVIDIA NIM, OpenAI, etc.)
+openapi: 3.0.3
+info:
+  title: Bookmark extension — provider APIs
+  version: 2.0.0
+servers:
+  - url: https://example.com
+paths:
+  /v1/embeddings:
+    post:
+      summary: OpenAI-compatible embeddings (indexing)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, input]
+              properties:
+                model:
+                  type: string
+                input:
+                  oneOf:
+                    - type: string
+                    - type: array
+                      items:
+                        type: string
+      responses:
+        "200":
+          description: Standard OpenAI embeddings response
+  /v1/chat/completions:
+    post:
+      summary: OpenAI-compatible chat (Q&A)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, messages]
+              properties:
+                model:
+                  type: string
+                messages:
+                  type: array
+                  items:
+                    type: object
+                temperature:
+                  type: number
+                max_tokens:
+                  type: integer
+      responses:
+        "200":
+          description: Standard chat completion response

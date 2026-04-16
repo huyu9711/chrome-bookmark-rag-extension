@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bookmark RAG</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="header">
+      <h1>Bookmark RAG</h1>
+      <a id="open-options" href="#" class="link">Options</a>
+    </header>
+
+    <section class="section">
+      <h2>Index</h2>
+      <div class="row">
+        <button type="button" id="btn-full" class="btn primary">Full index</button>
+        <button type="button" id="btn-incr" class="btn">Incremental</button>
+        <button type="button" id="btn-test" class="btn">Test (100)</button>
+      </div>
+      <div id="index-log" class="log" aria-live="polite"></div>
+    </section>
+
+    <section class="section">
+      <h2>Ask</h2>
+      <textarea id="query" rows="3" placeholder="Ask about your bookmarks…"></textarea>
+      <button type="button" id="btn-ask" class="btn primary">Send</button>
+      <div id="answer" class="answer"></div>
+      <div id="citations" class="citations"></div>
+    </section>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

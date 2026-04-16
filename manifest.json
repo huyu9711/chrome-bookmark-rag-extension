@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Bookmark RAG Manager",
+  "version": "1.0.0",
+  "description": "Index bookmarks into a remote RAG backend and ask questions with cited links.",
+  "permissions": ["bookmarks", "storage", "sidePanel", "tabs"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "src/background/index.ts",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open Bookmark RAG"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  },
+  "options_ui": {
+    "page": "src/options/index.html",
+    "open_in_tab": true
+  },
+  "commands": {
+    "open-side-panel": {
+      "suggested_key": {
+        "default": "Ctrl+B",
+        "mac": "Command+B"
+      },
+      "description": "Open Bookmark RAG side panel"
+    }
+  }
+}
