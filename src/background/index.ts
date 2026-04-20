@@ -351,9 +351,8 @@ async function runFullIndex(): Promise<void> {
       settings,
       items,
       async (batch, result) => {
-      const bookmarkIds = Array.from(new Set(batch.map((x) => x.bookmarkId)));
-      await deleteLocalRagVectorsByBookmarkIds(bookmarkIds);
-      await putLocalRagVectors(toLocalRagRecords(result));
+        // Full index clears the local store before upload; only insert vectors here.
+        await putLocalRagVectors(toLocalRagRecords(result));
       }
     );
     if (error) {
@@ -461,12 +460,12 @@ async function runIncrementalIndex(): Promise<void> {
           );
 
     await deleteLocalRagVectorsByBookmarkIds(removedBookmarkIds);
+    // Delete changed bookmark vectors once up-front; per-batch callback only inserts.
+    await deleteLocalRagVectorsByBookmarkIds(toUpload.map((bm) => bm.id));
     const { indexed, error, uploadedBookmarkIds } = await uploadBatches(
       settings,
       items,
-      async (batch, result) => {
-        const bookmarkIds = Array.from(new Set(batch.map((x) => x.bookmarkId)));
-        await deleteLocalRagVectorsByBookmarkIds(bookmarkIds);
+      async (_batch, result) => {
         await putLocalRagVectors(toLocalRagRecords(result));
       }
     );

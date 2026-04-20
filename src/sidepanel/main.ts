@@ -98,19 +98,21 @@ function escapeHtml(s: string) {
     .replace(/"/g, "&quot;");
 }
 
-function linkifyEscapedText(s: string): string {
-  const placeholders: string[] = [];
-
-  // 1) Markdown links: [label](https://example.com)
-  let out = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label, url) => {
-    const token = `__LINK_TOKEN_${placeholders.length}__`;
-    placeholders.push(
-      `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`
-    );
+function applyInlineMarkdown(escaped: string): string {
+  const codeTokens: string[] = [];
+  let out = escaped.replace(/`([^`\n]+)`/g, (_m, code) => {
+    const token = `__CODE_TOKEN_${codeTokens.length}__`;
+    codeTokens.push(`<code>${code}</code>`);
     return token;
   });
 
-  // 2) Plain URLs with scheme or www.
+  const linkTokens: string[] = [];
+  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label, url) => {
+    const token = `__LINK_TOKEN_${linkTokens.length}__`;
+    linkTokens.push(`<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+    return token;
+  });
+
   out = out.replace(/(?:https?:\/\/|www\.)[^\s<>"']+/g, (raw) => {
     let shown = raw;
     let suffix = "";
@@ -122,12 +124,78 @@ function linkifyEscapedText(s: string): string {
     return `<a href="${href}" target="_blank" rel="noopener noreferrer">${shown}</a>${suffix}`;
   });
 
-  // 3) Restore markdown-link placeholders.
+  out = out
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
+    .replace(/_([^_\n]+)_/g, "<em>$1</em>");
+
   out = out.replace(/__LINK_TOKEN_(\d+)__/g, (_m, idx) => {
     const n = Number(idx);
-    return Number.isFinite(n) && placeholders[n] ? placeholders[n] : _m;
+    return Number.isFinite(n) && linkTokens[n] ? linkTokens[n] : _m;
+  });
+  out = out.replace(/__CODE_TOKEN_(\d+)__/g, (_m, idx) => {
+    const n = Number(idx);
+    return Number.isFinite(n) && codeTokens[n] ? codeTokens[n] : _m;
   });
 
+  return out;
+}
+
+function markdownToHtml(text: string): string {
+  let escaped = escapeHtml(text).replace(/\r\n/g, "\n").trim();
+  if (!escaped) return "";
+
+  const blockTokens: string[] = [];
+  escaped = escaped.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_m, lang, code) => {
+    const token = `__BLOCK_TOKEN_${blockTokens.length}__`;
+    const cls = lang ? ` class="lang-${lang}"` : "";
+    blockTokens.push(`<pre><code${cls}>${code}</code></pre>`);
+    return token;
+  });
+
+  const blocks = escaped.split(/\n{2,}/).map((b) => b.trim()).filter(Boolean);
+  const htmlBlocks = blocks.map((block) => {
+    if (/^__BLOCK_TOKEN_\d+__$/.test(block)) {
+      return block;
+    }
+
+    const heading = block.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      const level = heading[1].length;
+      return `<h${level}>${applyInlineMarkdown(heading[2])}</h${level}>`;
+    }
+
+    const lines = block.split("\n");
+    if (lines.every((line) => /^\s*[-*]\s+/.test(line))) {
+      const items = lines
+        .map((line) => line.replace(/^\s*[-*]\s+/, ""))
+        .map((item) => `<li>${applyInlineMarkdown(item)}</li>`)
+        .join("");
+      return `<ul>${items}</ul>`;
+    }
+
+    if (lines.every((line) => /^\s*\d+\.\s+/.test(line))) {
+      const items = lines
+        .map((line) => line.replace(/^\s*\d+\.\s+/, ""))
+        .map((item) => `<li>${applyInlineMarkdown(item)}</li>`)
+        .join("");
+      return `<ol>${items}</ol>`;
+    }
+
+    if (lines.every((line) => /^\s*>\s?/.test(line))) {
+      const content = lines.map((line) => line.replace(/^\s*>\s?/, "")).join("<br/>");
+      return `<blockquote>${applyInlineMarkdown(content)}</blockquote>`;
+    }
+
+    return `<p>${applyInlineMarkdown(block).replace(/\n/g, "<br/>")}</p>`;
+  });
+
+  let out = htmlBlocks.join("\n");
+  out = out.replace(/__BLOCK_TOKEN_(\d+)__/g, (_m, idx) => {
+    const n = Number(idx);
+    return Number.isFinite(n) && blockTokens[n] ? blockTokens[n] : _m;
+  });
   return out;
 }
 
@@ -154,8 +222,7 @@ btnAsk.addEventListener("click", () => {
         return;
       }
       const text = res.answer || "";
-      const safe = linkifyEscapedText(escapeHtml(text)).replace(/\n/g, "<br/>");
-      renderAnswer(safe);
+      renderAnswer(markdownToHtml(text));
       const cites = res.citations || [];
       if (cites.length) {
         const h = document.createElement("h3");
