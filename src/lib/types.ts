@@ -15,8 +15,6 @@ export interface ExtensionSettings {
   ragTextMaxChars: number;
   /** Embeddings request timeout (milliseconds). */
   ragEmbeddingsTimeoutMs: number;
-  /** Max retries for embeddings batch timeouts. */
-  ragEmbeddingsRetryMax: number;
   /** Same idea as RAG — LLM provider root */
   qaBaseUrl: string;
   qaApiKey: string;
@@ -51,7 +49,6 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   ragChunkOverlap: 50,
   ragTextMaxChars: 1000,
   ragEmbeddingsTimeoutMs: 60_000,
-  ragEmbeddingsRetryMax: 2,
   qaBaseUrl: "",
   qaApiKey: "",
   qaModel: "openai/openai/gpt-5.1-codex",
@@ -110,6 +107,7 @@ export type BgRequest =
   | { type: "INDEX_FULL" }
   | { type: "INDEX_TEST" }
   | { type: "INDEX_INCREMENTAL" }
+  | { type: "INDEX_SKIP_CURRENT" }
   | { type: "QUERY"; query: string };
 
 export type BgResponse =

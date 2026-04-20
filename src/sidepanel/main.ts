@@ -4,10 +4,13 @@ const indexLog = document.getElementById("index-log")!;
 const btnFull = document.getElementById("btn-full") as HTMLButtonElement;
 const btnIncr = document.getElementById("btn-incr") as HTMLButtonElement;
 const btnTest = document.getElementById("btn-test") as HTMLButtonElement;
+const btnSkip = document.getElementById("btn-skip") as HTMLButtonElement;
 const btnAsk = document.getElementById("btn-ask") as HTMLButtonElement;
 const queryEl = document.getElementById("query") as HTMLTextAreaElement;
 const answerEl = document.getElementById("answer")!;
 const citationsEl = document.getElementById("citations")!;
+const keepAlivePort = chrome.runtime.connect({ name: "index-keepalive" });
+let keepAliveTimer: number | undefined;
 
 document.getElementById("open-options")!.addEventListener("click", (e) => {
   e.preventDefault();
@@ -26,7 +29,20 @@ function setIndexing(busy: boolean) {
   btnFull.disabled = busy;
   btnIncr.disabled = busy;
   btnTest.disabled = busy;
+  btnSkip.disabled = !busy;
+  if (busy) {
+    if (keepAliveTimer == null) {
+      keepAliveTimer = window.setInterval(() => {
+        keepAlivePort.postMessage({ type: "PING", t: Date.now() });
+      }, 20_000);
+    }
+  } else if (keepAliveTimer != null) {
+    window.clearInterval(keepAliveTimer);
+    keepAliveTimer = undefined;
+  }
 }
+
+setIndexing(false);
 
 chrome.runtime.onMessage.addListener((msg: BgResponse) => {
   if (msg.type === "INDEX_PROGRESS") {
@@ -75,6 +91,11 @@ btnTest.addEventListener("click", () => {
   setIndexing(true);
   logLine("Starting test index (first 100 bookmarks)…");
   chrome.runtime.sendMessage({ type: "INDEX_TEST" });
+});
+
+btnSkip.addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "INDEX_SKIP_CURRENT" });
+  logLine("Requested: skip current embedding batch.");
 });
 
 function renderAnswer(html: string) {
@@ -250,4 +271,12 @@ queryEl.addEventListener("keydown", (e) => {
     e.preventDefault();
     btnAsk.click();
   }
+});
+
+window.addEventListener("beforeunload", () => {
+  if (keepAliveTimer != null) {
+    window.clearInterval(keepAliveTimer);
+    keepAliveTimer = undefined;
+  }
+  keepAlivePort.disconnect();
 });

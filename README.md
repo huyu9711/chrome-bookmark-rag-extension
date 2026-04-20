@@ -8,7 +8,7 @@ by default).
 
 - **Local RAG**: embeddings are stored in IndexedDB and retrieved client‑side.
 - **OpenAI‑compatible APIs**: works with NVIDIA NIM, OpenAI, vLLM, LiteLLM, etc.
-- **Configurable indexing**: chunk size, overlap, max page text length, timeouts, retries.
+- **Configurable indexing**: chunk size, overlap, max page text length, and timeout.
 - **Safe indexing**: skip FTP / chrome:// and CORS‑blocked domains (Chrome Web Store).
 - **Usable UX**: test index, confirmation dialogs, clickable answer links, numbered citations.
 
@@ -33,7 +33,6 @@ Open **Options** from the side panel.
 - Chunk size / overlap (default `3000` / `50`)
 - Max page text (chars) (default `1000`)
 - Embeddings timeout (seconds) (default `60`)
-- Embeddings timeout retries (default `2`)
 
 **Q&A**
 - API style: `responses` (default), `chat`, `completions`

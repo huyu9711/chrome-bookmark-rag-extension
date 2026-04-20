@@ -26,7 +26,6 @@ Open **Options** (link at top right of the side panel).
 - **Chunk size / overlap**: how text is split before embedding
 - **Max page text (chars)**: default `1000`
 - **Embeddings timeout (seconds)**: default `60`
-- **Embeddings timeout retries**: default `2`
 
 ### Q&A (LLM)
 - **API style**: default `Responses`
@@ -89,10 +88,9 @@ You need to run **Full index** or **Test (100)** first to build the local RAG da
 ### “Batch X/Y failed: Embeddings request timed out”
 Your embeddings provider is too slow for the configured timeout. Increase:
 - **Embeddings timeout (seconds)**
-- **Embeddings timeout retries**
 
 ### “User aborted”
-This is a browser abort (timeout or service worker suspension). Increase timeout/retries.
+This is a browser abort (timeout or service worker suspension). Increase timeout.
 
 ### CORS errors while indexing
 Some domains (Chrome Web Store, tools.google.com) block extension fetches. The extension

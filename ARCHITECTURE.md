@@ -6,7 +6,7 @@
 - Include bookmark title in the indexed content.
 - Provide chunking with overlap for embedding (configurable).
 - Use OpenAI-compatible embeddings API; NVIDIA v1/responses for Q&A by default.
-- Add retry + backoff for embeddings timeouts (configurable).
+- Skip to next batch on embeddings timeout/error; no retries.
 - Configurable timeouts for embeddings (default 60s).
 - Avoid CORS-blocked domains and non-HTTP(S) URLs (skip Chrome Web Store + FTP).
 - Provide Test Index (100) for quick validation.
@@ -110,7 +110,6 @@ Settings include:
   - Chunk size + overlap
   - Max page text chars
   - Embeddings timeout (seconds)
-  - Embeddings timeout retries
 - Q&A:
   - API style (responses/chat/completions)
   - Base URL, key, model, paths
@@ -133,9 +132,8 @@ Tools:
 5. Store vectors in IndexedDB.
 6. Update index state in `chrome.storage.local`.
 
-Retries:
-- If embeddings timeout, retry with exponential backoff (configurable).
-- If retries fail, skip batch and continue.
+Error handling:
+- If an embeddings batch fails (timeout/error), skip it and continue with next batch.
 
 ### Q&A
 1. Embed query text.
@@ -157,8 +155,7 @@ Stored in `DEFAULT_SETTINGS` (`src/lib/types.ts`):
 
 ## 6) Error Handling Strategy
 - Embeddings timeout / abort:
-  - Retry N times with backoff
-  - Skip batch after retries
+  - Skip current batch and continue
 - Non-timeout errors:
   - Stop indexing and surface error
 - No local RAG DB:
@@ -175,7 +172,7 @@ Stored in `DEFAULT_SETTINGS` (`src/lib/types.ts`):
 - Embeddings timeout limits should be tuned for provider latency.
 
 ## 9) Key Files Index
-- `src/background/index.ts` — orchestration, indexing, Q&A, retries
+- `src/background/index.ts` — orchestration, indexing, Q&A, skip-on-error flow
 - `src/lib/api.ts` — embeddings + Q&A HTTP client
 - `src/lib/local-rag-db.ts` — IndexedDB RAG store
 - `src/lib/bookmarks.ts` — fetch + skip rules

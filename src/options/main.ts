@@ -10,7 +10,6 @@ const ragChunkSize = document.getElementById("ragChunkSize") as HTMLInputElement
 const ragChunkOverlap = document.getElementById("ragChunkOverlap") as HTMLInputElement;
 const ragTextMaxChars = document.getElementById("ragTextMaxChars") as HTMLInputElement;
 const ragEmbeddingsTimeoutSec = document.getElementById("ragEmbeddingsTimeoutSec") as HTMLInputElement;
-const ragEmbeddingsRetryMax = document.getElementById("ragEmbeddingsRetryMax") as HTMLInputElement;
 const qaBaseUrl = document.getElementById("qaBaseUrl") as HTMLInputElement;
 const qaApiKey = document.getElementById("qaApiKey") as HTMLInputElement;
 const qaModel = document.getElementById("qaModel") as HTMLInputElement;
@@ -49,9 +48,6 @@ async function fill() {
   ragTextMaxChars.value = String(s.ragTextMaxChars ?? DEFAULT_SETTINGS.ragTextMaxChars);
   ragEmbeddingsTimeoutSec.value = String(
     Math.round((s.ragEmbeddingsTimeoutMs ?? DEFAULT_SETTINGS.ragEmbeddingsTimeoutMs) / 1000)
-  );
-  ragEmbeddingsRetryMax.value = String(
-    s.ragEmbeddingsRetryMax ?? DEFAULT_SETTINGS.ragEmbeddingsRetryMax
   );
   qaBaseUrl.value = s.qaBaseUrl;
   qaApiKey.value = s.qaApiKey;
@@ -102,12 +98,6 @@ function readFormSettings(): ExtensionSettings {
     5
   );
   const clampedTimeoutSec = Math.min(300, Math.max(5, timeoutSec));
-  const retryMax = parsePositiveInt(
-    ragEmbeddingsRetryMax.value,
-    DEFAULT_SETTINGS.ragEmbeddingsRetryMax,
-    0
-  );
-  const clampedRetryMax = Math.min(10, Math.max(0, retryMax));
   return {
     ragBaseUrl: ragBaseUrl.value.trim(),
     ragApiKey: ragApiKey.value,
@@ -117,7 +107,6 @@ function readFormSettings(): ExtensionSettings {
     ragChunkOverlap: Math.min(chunkOverlap, Math.max(0, chunkSize - 1)),
     ragTextMaxChars: maxChars,
     ragEmbeddingsTimeoutMs: clampedTimeoutSec * 1000,
-    ragEmbeddingsRetryMax: clampedRetryMax,
     qaBaseUrl: qaBaseUrl.value.trim(),
     qaApiKey: qaApiKey.value,
     qaModel: qaModel.value.trim() || DEFAULT_SETTINGS.qaModel,

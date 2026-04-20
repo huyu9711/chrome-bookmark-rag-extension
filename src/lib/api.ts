@@ -32,6 +32,35 @@ function sanitizeEmbeddingsTimeoutMs(v: number | undefined): number {
   return Math.min(300_000, Math.max(5_000, n));
 }
 
+function hasTimeoutLikeMessage(e: unknown): boolean {
+  return e instanceof Error && /timeout|timed out|aborted|aborterror/i.test(e.message);
+}
+
+async function withHardTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  onTimeout?: () => void
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          try {
+            onTimeout?.();
+          } catch {
+            /* ignore timeout callback errors */
+          }
+          reject(new Error(`Embeddings hard timeout after ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function splitByCharChunks(text: string, chunkSize: number, chunkOverlap: number): string[] {
   if (!text) return [""];
   const stride = Math.max(1, chunkSize - chunkOverlap);
@@ -211,23 +240,43 @@ function parseEmbeddingVectors(data: unknown): number[][] | null {
 async function requestEmbeddings(
   settings: ExtensionSettings,
   input: string[],
-  timeoutMs: number
+  timeoutMs: number,
+  externalSignal?: AbortSignal
 ): Promise<{ ok: boolean; vectors: number[][]; error?: string }> {
   const url = ragEmbeddingsUrl(settings);
   let res: Response;
+  const hardTimeoutMs = timeoutMs + 5_000;
+  const controller = new AbortController();
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+  }
+  const softTimer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: headers(settings.ragApiKey),
-      body: JSON.stringify({
-        model: settings.ragModel,
-        input,
-        ...EMBEDDING_EXTRA,
+    res = await withHardTimeout(
+      fetch(url, {
+        method: "POST",
+        headers: headers(settings.ragApiKey),
+        body: JSON.stringify({
+          model: settings.ragModel,
+          input,
+          ...EMBEDDING_EXTRA,
+        }),
+        signal: controller.signal,
       }),
-      signal: timeoutSignal(timeoutMs),
-    });
+      hardTimeoutMs,
+      () => controller.abort()
+    );
   } catch (e) {
-    if (isAbortError(e)) {
+    if (externalSignal?.aborted) {
+      return {
+        ok: false,
+        vectors: [],
+        error: "Embeddings request aborted by user",
+      };
+    }
+    if (isAbortError(e) || hasTimeoutLikeMessage(e)) {
       return {
         ok: false,
         vectors: [],
@@ -239,8 +288,26 @@ async function requestEmbeddings(
       vectors: [],
       error: e instanceof Error ? e.message : String(e),
     };
+  } finally {
+    clearTimeout(softTimer);
+    if (externalSignal) {
+      externalSignal.removeEventListener("abort", onExternalAbort);
+    }
   }
-  const text = await res.text();
+  let text = "";
+  try {
+    text = await withHardTimeout(res.text(), hardTimeoutMs, () => controller.abort());
+  } catch (e) {
+    return {
+      ok: false,
+      vectors: [],
+      error: hasTimeoutLikeMessage(e)
+        ? `Embeddings response read timed out after ${Math.round(hardTimeoutMs / 1000)}s`
+        : e instanceof Error
+          ? e.message
+          : String(e),
+    };
+  }
   let data: unknown;
   try {
     data = JSON.parse(text);
@@ -287,12 +354,13 @@ export async function embedQueryText(
 
 export async function postEmbeddingsBatch(
   settings: ExtensionSettings,
-  items: BookmarkItem[]
+  items: BookmarkItem[],
+  opts?: { signal?: AbortSignal }
 ): Promise<IndexResponseBody> {
   const chunks = itemsToEmbeddingChunks(settings, items);
   const input = chunks.map((c) => c.payload);
   const timeoutMs = sanitizeEmbeddingsTimeoutMs(settings.ragEmbeddingsTimeoutMs);
-  const r = await requestEmbeddings(settings, input, timeoutMs);
+  const r = await requestEmbeddings(settings, input, timeoutMs, opts?.signal);
   if (!r.ok) {
     return {
       ok: false,

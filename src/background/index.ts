@@ -12,7 +12,6 @@ import {
   type FlatBookmark,
 } from "../lib/bookmarks";
 import { loadIndexState, loadSettings, saveIndexState } from "../lib/storage";
-import { DEFAULT_SETTINGS } from "../lib/types";
 import type {
   BgRequest,
   BgResponse,
@@ -29,7 +28,7 @@ const TEST_INDEX_LIMIT = 100;
 const FETCH_CONCURRENCY = 4;
 const RAG_TOP_K = 6;
 const MAX_CONTEXT_CHARS_PER_HIT = 1200;
-const EMBEDDING_RETRY_BASE_DELAY_MS = 500;
+const LOCAL_VECTOR_WRITE_TIMEOUT_MS = 20_000;
 
 interface UploadBatchesResult {
   indexed: number;
@@ -37,6 +36,14 @@ interface UploadBatchesResult {
   uploadedBookmarkIds: Set<string>;
   skippedTimeoutBatches: number;
 }
+
+interface IndexRunControl {
+  requestSkipCurrent: boolean;
+  abortCurrentEmbedding?: () => void;
+}
+
+let activeIndexRun: IndexRunControl | null = null;
+const keepAlivePorts = new Set<chrome.runtime.Port>();
 
 function broadcast(msg: BgResponse) {
   chrome.runtime.sendMessage(msg).catch(() => {
@@ -168,25 +175,29 @@ function buildRagPrompt(
   return out;
 }
 
-function isTimeoutBatchError(reason: string): boolean {
-  const m = reason.toLowerCase();
-  return (
-    m.includes("timed out") ||
-    m.includes("timeout") ||
-    m.includes("aborterror") ||
-    m.includes("aborted") ||
-    m.includes("user aborted")
-  );
+function isManualSkipError(reason: string): boolean {
+  return /aborted by user/i.test(reason);
 }
 
-function sanitizeEmbeddingsRetryMax(v: number | undefined): number {
-  if (!Number.isFinite(v)) return DEFAULT_SETTINGS.ragEmbeddingsRetryMax;
-  const n = Math.floor(Number(v));
-  return Math.min(10, Math.max(0, n));
+function formatElapsed(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`)),
+          timeoutMs
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function answerQueryWithLocalRag(
@@ -239,7 +250,8 @@ async function answerQueryWithLocalRag(
 async function uploadBatches(
   settings: Awaited<ReturnType<typeof loadSettings>>,
   items: BookmarkItem[],
-  onBatchSuccess?: (batch: BookmarkItem[], result: IndexResponseBody) => Promise<void>
+  onBatchSuccess: ((batch: BookmarkItem[], result: IndexResponseBody) => Promise<void>) | undefined,
+  runControl: IndexRunControl
 ): Promise<UploadBatchesResult> {
   const batches: BookmarkItem[][] = [];
   for (let i = 0; i < items.length; i += EMBEDDING_BATCH_SIZE) {
@@ -257,65 +269,94 @@ async function uploadBatches(
   let totalIndexed = 0;
   let skippedTimeoutBatches = 0;
   const uploadedBookmarkIds = new Set<string>();
-  const retryMax = sanitizeEmbeddingsRetryMax(settings.ragEmbeddingsRetryMax);
   for (let b = 0; b < batches.length; b++) {
+    const batchStartMs = Date.now();
+    if (runControl.requestSkipCurrent) {
+      runControl.requestSkipCurrent = false;
+      broadcast({
+        type: "INDEX_PROGRESS",
+        phase: "upload",
+        current: b + 1,
+        total: batches.length,
+        detail: `Batch ${b + 1}/${batches.length} skipped by user before request start.`,
+      });
+      continue;
+    }
     broadcast({
       type: "INDEX_PROGRESS",
       phase: "upload",
       current: b + 1,
       total: batches.length,
-      detail: `Embeddings batch ${b + 1}/${batches.length}`,
+      detail: `Embeddings batch ${b + 1}/${batches.length} started`,
     });
-    let attempt = 0;
-    while (true) {
-      const r = await postEmbeddingsBatch(settings, batches[b]);
-      if (r.ok) {
-        totalIndexed += r.indexed;
-        for (const item of batches[b]) {
-          uploadedBookmarkIds.add(item.bookmarkId);
+    const attemptAbort = new AbortController();
+    runControl.abortCurrentEmbedding = () => attemptAbort.abort();
+    const r = await postEmbeddingsBatch(settings, batches[b], { signal: attemptAbort.signal });
+    runControl.abortCurrentEmbedding = undefined;
+
+    if (r.ok) {
+      if (onBatchSuccess) {
+        try {
+          await withTimeout(
+            onBatchSuccess(batches[b], r),
+            LOCAL_VECTOR_WRITE_TIMEOUT_MS,
+            "Local vector write"
+          );
+        } catch (e) {
+          skippedTimeoutBatches += 1;
+          const reason = e instanceof Error ? e.message : String(e);
+          broadcast({
+            type: "INDEX_PROGRESS",
+            phase: "upload",
+            current: b + 1,
+            total: batches.length,
+            detail: `Batch ${b + 1}/${batches.length} skipped: ${reason} (elapsed ${formatElapsed(
+              Date.now() - batchStartMs
+            )}).`,
+          });
+          continue;
         }
-        if (onBatchSuccess) {
-          await onBatchSuccess(batches[b], r);
-        }
-        break;
       }
-
-      const reason = r.error || "unknown embeddings upload error";
-      if (isTimeoutBatchError(reason) && attempt < retryMax) {
-        const delayMs = EMBEDDING_RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
-        attempt += 1;
-        broadcast({
-          type: "INDEX_PROGRESS",
-          phase: "upload",
-          current: b + 1,
-          total: batches.length,
-          detail: `Timeout on batch ${b + 1}/${batches.length}; retry ${attempt}/${retryMax} in ${Math.round(
-            delayMs / 1000
-          )}s.`,
-        });
-        await sleep(delayMs);
-        continue;
+      totalIndexed += r.indexed;
+      for (const item of batches[b]) {
+        uploadedBookmarkIds.add(item.bookmarkId);
       }
-
-      if (isTimeoutBatchError(reason)) {
-        skippedTimeoutBatches += 1;
-        broadcast({
-          type: "INDEX_PROGRESS",
-          phase: "upload",
-          current: b + 1,
-          total: batches.length,
-          detail: `Timeout on batch ${b + 1}/${batches.length}; skipped after ${attempt} retry(ies).`,
-        });
-        break;
-      }
-
-      return {
-        indexed: totalIndexed,
-        uploadedBookmarkIds,
-        skippedTimeoutBatches,
-        error: `Batch ${b + 1}/${batches.length} failed: ${reason}`,
-      };
+      broadcast({
+        type: "INDEX_PROGRESS",
+        phase: "upload",
+        current: b + 1,
+        total: batches.length,
+        detail: `Batch ${b + 1}/${batches.length} done in ${formatElapsed(
+          Date.now() - batchStartMs
+        )}.`,
+      });
+      continue;
     }
+
+    const reason = r.error || "unknown embeddings upload error";
+    skippedTimeoutBatches += 1;
+    if (isManualSkipError(reason) || runControl.requestSkipCurrent) {
+      runControl.requestSkipCurrent = false;
+      broadcast({
+        type: "INDEX_PROGRESS",
+        phase: "upload",
+        current: b + 1,
+        total: batches.length,
+        detail: `Batch ${b + 1}/${batches.length} skipped by user after ${formatElapsed(
+          Date.now() - batchStartMs
+        )}.`,
+      });
+      continue;
+    }
+    broadcast({
+      type: "INDEX_PROGRESS",
+      phase: "upload",
+      current: b + 1,
+      total: batches.length,
+      detail: `Batch ${b + 1}/${batches.length} skipped: ${reason} (elapsed ${formatElapsed(
+        Date.now() - batchStartMs
+      )}).`,
+    });
   }
   if (skippedTimeoutBatches > 0) {
     broadcast({
@@ -323,13 +364,16 @@ async function uploadBatches(
       phase: "upload",
       current: batches.length,
       total: batches.length,
-      detail: `Skipped ${skippedTimeoutBatches} timed-out batch(es); indexing continued.`,
+      detail: `Skipped ${skippedTimeoutBatches} batch(es) due to timeout/abort; indexing continued.`,
     });
   }
+  runControl.abortCurrentEmbedding = undefined;
   return { indexed: totalIndexed, uploadedBookmarkIds, skippedTimeoutBatches };
 }
 
 async function runFullIndex(): Promise<void> {
+  const runControl: IndexRunControl = { requestSkipCurrent: false };
+  activeIndexRun = runControl;
   try {
     const settings = await loadSettings();
     if (!settings.ragBaseUrl.trim()) {
@@ -353,7 +397,8 @@ async function runFullIndex(): Promise<void> {
       async (batch, result) => {
         // Full index clears the local store before upload; only insert vectors here.
         await putLocalRagVectors(toLocalRagRecords(result));
-      }
+      },
+      runControl
     );
     if (error) {
       broadcast({ type: "INDEX_DONE", ok: false, indexed, error });
@@ -382,10 +427,14 @@ async function runFullIndex(): Promise<void> {
       indexed: 0,
       error: e instanceof Error ? e.message : String(e),
     });
+  } finally {
+    if (activeIndexRun === runControl) activeIndexRun = null;
   }
 }
 
 async function runTestIndex(limit = TEST_INDEX_LIMIT): Promise<void> {
+  const runControl: IndexRunControl = { requestSkipCurrent: false };
+  activeIndexRun = runControl;
   try {
     const settings = await loadSettings();
     if (!settings.ragBaseUrl.trim()) {
@@ -404,9 +453,14 @@ async function runTestIndex(limit = TEST_INDEX_LIMIT): Promise<void> {
     });
     const items = await buildAllItems(settings, flat);
     await clearLocalRagVectors();
-    const { indexed, error } = await uploadBatches(settings, items, async (_batch, result) => {
-      await putLocalRagVectors(toLocalRagRecords(result));
-    });
+    const { indexed, error } = await uploadBatches(
+      settings,
+      items,
+      async (_batch, result) => {
+        await putLocalRagVectors(toLocalRagRecords(result));
+      },
+      runControl
+    );
     if (error) {
       broadcast({ type: "INDEX_DONE", ok: false, indexed, error });
       return;
@@ -420,10 +474,14 @@ async function runTestIndex(limit = TEST_INDEX_LIMIT): Promise<void> {
       indexed: 0,
       error: e instanceof Error ? e.message : String(e),
     });
+  } finally {
+    if (activeIndexRun === runControl) activeIndexRun = null;
   }
 }
 
 async function runIncrementalIndex(): Promise<void> {
+  const runControl: IndexRunControl = { requestSkipCurrent: false };
+  activeIndexRun = runControl;
   try {
     const settings = await loadSettings();
     if (!settings.ragBaseUrl.trim()) {
@@ -467,7 +525,8 @@ async function runIncrementalIndex(): Promise<void> {
       items,
       async (_batch, result) => {
         await putLocalRagVectors(toLocalRagRecords(result));
-      }
+      },
+      runControl
     );
     if (error) {
       broadcast({ type: "INDEX_DONE", ok: false, indexed, error });
@@ -503,11 +562,23 @@ async function runIncrementalIndex(): Promise<void> {
       indexed: 0,
       error: e instanceof Error ? e.message : String(e),
     });
+  } finally {
+    if (activeIndexRun === runControl) activeIndexRun = null;
   }
 }
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true })?.catch?.(() => {});
+});
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "index-keepalive") return;
+  keepAlivePorts.add(port);
+  port.onMessage.addListener(() => {
+    /* keepalive ping */
+  });
+  const cleanup = () => keepAlivePorts.delete(port);
+  port.onDisconnect.addListener(cleanup);
 });
 
 chrome.commands.onCommand.addListener((command) => {
@@ -558,6 +629,30 @@ chrome.runtime.onMessage.addListener(
           });
         }
       })();
+      return true;
+    }
+    if (msg.type === "INDEX_SKIP_CURRENT") {
+      sendResponse({ type: "ACK" });
+      if (!activeIndexRun) {
+        // If worker restarted, clear panel busy state and ask user to restart indexing.
+        broadcast({
+          type: "INDEX_DONE",
+          ok: false,
+          indexed: 0,
+          error:
+            "No active indexing run in background (worker was likely restarted). Please run Incremental to continue.",
+        });
+        return true;
+      }
+      activeIndexRun.requestSkipCurrent = true;
+      activeIndexRun.abortCurrentEmbedding?.();
+      broadcast({
+        type: "INDEX_PROGRESS",
+        phase: "upload",
+        current: 0,
+        total: 0,
+        detail: "Skip requested: aborting current embedding batch.",
+      });
       return true;
     }
     if (msg.type === "INDEX_FULL") {
