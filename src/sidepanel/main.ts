@@ -102,7 +102,7 @@ function renderAnswer(html: string) {
   answerEl.innerHTML = html;
   answerEl.querySelectorAll("a[href]").forEach((a) => {
     a.addEventListener("click", (e) => {
-      const href = (a as HTMLAnchorElement).href;
+      const href = (a as HTMLAnchorElement).getAttribute("href") || "";
       if (href.startsWith("http://") || href.startsWith("https://")) {
         e.preventDefault();
         chrome.tabs.create({ url: href, active: true });
@@ -119,19 +119,33 @@ function escapeHtml(s: string) {
     .replace(/"/g, "&quot;");
 }
 
-function applyInlineMarkdown(escaped: string): string {
-  const codeTokens: string[] = [];
-  let out = escaped.replace(/`([^`\n]+)`/g, (_m, code) => {
-    const token = `__CODE_TOKEN_${codeTokens.length}__`;
-    codeTokens.push(`<code>${code}</code>`);
+function escapeAttr(s: string) {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/'/g, "&#39;");
+}
+
+function applyInlineMarkdown(raw: string): string {
+  const htmlTokens: string[] = [];
+  function putHtmlToken(html: string): string {
+    const token = `@@HTML${htmlTokens.length}@@`;
+    htmlTokens.push(html);
     return token;
+  }
+
+  // Protect code spans first so markdown/emphasis/link regex won't touch them.
+  let out = raw.replace(/`([^`\n]+)`/g, (_m, code) => {
+    return putHtmlToken(`<code>${escapeHtml(code)}</code>`);
   });
 
-  const linkTokens: string[] = [];
+  // Preserve original URL bytes as captured, then escape surrounding text later.
   out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, label, url) => {
-    const token = `__LINK_TOKEN_${linkTokens.length}__`;
-    linkTokens.push(`<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`);
-    return token;
+    return putHtmlToken(
+      `<a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`
+    );
   });
 
   out = out.replace(/(?:https?:\/\/|www\.)[^\s<>"']+/g, (raw) => {
@@ -142,42 +156,41 @@ function applyInlineMarkdown(escaped: string): string {
       shown = shown.slice(0, -1);
     }
     const href = shown.startsWith("www.") ? `https://${shown}` : shown;
-    return `<a href="${href}" target="_blank" rel="noopener noreferrer">${shown}</a>${suffix}`;
+    return `${putHtmlToken(
+      `<a href="${escapeAttr(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(shown)}</a>`
+    )}${suffix}`;
   });
 
+  out = escapeHtml(out);
   out = out
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/__([^_]+)__/g, "<strong>$1</strong>")
     .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
     .replace(/_([^_\n]+)_/g, "<em>$1</em>");
 
-  out = out.replace(/__LINK_TOKEN_(\d+)__/g, (_m, idx) => {
+  out = out.replace(/@@HTML(\d+)@@/g, (_m, idx) => {
     const n = Number(idx);
-    return Number.isFinite(n) && linkTokens[n] ? linkTokens[n] : _m;
-  });
-  out = out.replace(/__CODE_TOKEN_(\d+)__/g, (_m, idx) => {
-    const n = Number(idx);
-    return Number.isFinite(n) && codeTokens[n] ? codeTokens[n] : _m;
+    return Number.isFinite(n) && htmlTokens[n] ? htmlTokens[n] : _m;
   });
 
   return out;
 }
 
 function markdownToHtml(text: string): string {
-  let escaped = escapeHtml(text).replace(/\r\n/g, "\n").trim();
-  if (!escaped) return "";
+  let normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return "";
 
   const blockTokens: string[] = [];
-  escaped = escaped.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_m, lang, code) => {
-    const token = `__BLOCK_TOKEN_${blockTokens.length}__`;
+  normalized = normalized.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_m, lang, code) => {
+    const token = `@@BLOCK${blockTokens.length}@@`;
     const cls = lang ? ` class="lang-${lang}"` : "";
-    blockTokens.push(`<pre><code${cls}>${code}</code></pre>`);
+    blockTokens.push(`<pre><code${cls}>${escapeHtml(code)}</code></pre>`);
     return token;
   });
 
-  const blocks = escaped.split(/\n{2,}/).map((b) => b.trim()).filter(Boolean);
+  const blocks = normalized.split(/\n{2,}/).map((b) => b.trim()).filter(Boolean);
   const htmlBlocks = blocks.map((block) => {
-    if (/^__BLOCK_TOKEN_\d+__$/.test(block)) {
+    if (/^@@BLOCK\d+@@$/.test(block)) {
       return block;
     }
 
@@ -205,15 +218,18 @@ function markdownToHtml(text: string): string {
     }
 
     if (lines.every((line) => /^\s*>\s?/.test(line))) {
-      const content = lines.map((line) => line.replace(/^\s*>\s?/, "")).join("<br/>");
-      return `<blockquote>${applyInlineMarkdown(content)}</blockquote>`;
+      const content = lines
+        .map((line) => line.replace(/^\s*>\s?/, ""))
+        .map((line) => applyInlineMarkdown(line))
+        .join("<br/>");
+      return `<blockquote>${content}</blockquote>`;
     }
 
     return `<p>${applyInlineMarkdown(block).replace(/\n/g, "<br/>")}</p>`;
   });
 
   let out = htmlBlocks.join("\n");
-  out = out.replace(/__BLOCK_TOKEN_(\d+)__/g, (_m, idx) => {
+  out = out.replace(/@@BLOCK(\d+)@@/g, (_m, idx) => {
     const n = Number(idx);
     return Number.isFinite(n) && blockTokens[n] ? blockTokens[n] : _m;
   });
