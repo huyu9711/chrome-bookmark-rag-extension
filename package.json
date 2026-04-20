@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build && node scripts/bundle-background.mjs",
-    "mock-server": "node server/mock-server.mjs"
+    "mock-server": "node server/mock-server.mjs",
+    "validate:webstore": "node scripts/validate-webstore-package.mjs",
+    "package:webstore": "npm run build && npm run validate:webstore && cd dist && zip -r ../webstore-package.zip ."
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.0.0-beta.28",
