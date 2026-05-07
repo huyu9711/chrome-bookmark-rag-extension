@@ -3,7 +3,7 @@
   "name": "Bookmark RAG Manager",
   "version": "1.0.0",
   "description": "Index bookmarks into a remote RAG backend and ask questions with cited links.",
-  "permissions": ["bookmarks", "storage", "sidePanel", "tabs"],
+  "permissions": ["bookmarks", "storage", "sidePanel"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "src/background/index.ts",

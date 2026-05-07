@@ -82,7 +82,7 @@ Use:
 
 ## Permissions
 
-- `bookmarks`, `storage`, `sidePanel`, `tabs`
+- `bookmarks`, `storage`, `sidePanel`
 - `http://*/*`, `https://*/*` (fetch bookmark pages)
 
 ## Security
