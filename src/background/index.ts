@@ -15,6 +15,7 @@ import { loadIndexState, loadSettings, saveIndexState } from "../lib/storage";
 import type {
   BgRequest,
   BgResponse,
+  BookmarkIndexState,
   BookmarkItem,
   Citation,
   IndexResponseBody,
@@ -33,7 +34,6 @@ const LOCAL_VECTOR_WRITE_TIMEOUT_MS = 20_000;
 interface UploadBatchesResult {
   indexed: number;
   error?: string;
-  uploadedBookmarkIds: Set<string>;
   skippedTimeoutBatches: number;
 }
 
@@ -183,21 +183,46 @@ function formatElapsed(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+  onTimeout?: () => void
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<T>((_resolve, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`)),
-          timeoutMs
-        );
+        timer = setTimeout(() => {
+          try {
+            onTimeout?.();
+          } catch {
+            /* ignore timeout callback errors */
+          }
+          reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
       }),
     ]);
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+async function makeIndexStateEntry(item: BookmarkItem): Promise<BookmarkIndexState> {
+  return {
+    url: item.url,
+    title: item.title,
+    contentHash: await hashContent(item.url, item.title, item.text),
+    lastIndexedAt: Date.now(),
+  };
+}
+
+async function checkpointItems(state: IndexStateMap, items: BookmarkItem[]): Promise<void> {
+  for (const item of items) {
+    state[item.bookmarkId] = await makeIndexStateEntry(item);
+  }
+  await saveIndexState(state);
 }
 
 async function answerQueryWithLocalRag(
@@ -251,7 +276,8 @@ async function uploadBatches(
   settings: Awaited<ReturnType<typeof loadSettings>>,
   items: BookmarkItem[],
   onBatchSuccess: ((batch: BookmarkItem[], result: IndexResponseBody) => Promise<void>) | undefined,
-  runControl: IndexRunControl
+  runControl: IndexRunControl,
+  onManualSkip?: (batch: BookmarkItem[]) => Promise<void>
 ): Promise<UploadBatchesResult> {
   const batches: BookmarkItem[][] = [];
   for (let i = 0; i < items.length; i += EMBEDDING_BATCH_SIZE) {
@@ -261,18 +287,17 @@ async function uploadBatches(
   if (batches.length === 0) {
     return {
       indexed: 0,
-      uploadedBookmarkIds: new Set<string>(),
       skippedTimeoutBatches: 0,
     };
   }
 
   let totalIndexed = 0;
   let skippedTimeoutBatches = 0;
-  const uploadedBookmarkIds = new Set<string>();
   for (let b = 0; b < batches.length; b++) {
     const batchStartMs = Date.now();
     if (runControl.requestSkipCurrent) {
       runControl.requestSkipCurrent = false;
+      await onManualSkip?.(batches[b]);
       broadcast({
         type: "INDEX_PROGRESS",
         phase: "upload",
@@ -291,8 +316,23 @@ async function uploadBatches(
     });
     const attemptAbort = new AbortController();
     runControl.abortCurrentEmbedding = () => attemptAbort.abort();
-    const r = await postEmbeddingsBatch(settings, batches[b], { signal: attemptAbort.signal });
-    runControl.abortCurrentEmbedding = undefined;
+    let r: IndexResponseBody;
+    try {
+      r = await withTimeout(
+        postEmbeddingsBatch(settings, batches[b], { signal: attemptAbort.signal }),
+        settings.ragEmbeddingsTimeoutMs + 5_000,
+        "Embeddings batch",
+        () => attemptAbort.abort()
+      );
+    } catch (e) {
+      r = {
+        ok: false,
+        indexed: 0,
+        error: e instanceof Error ? e.message : String(e),
+      };
+    } finally {
+      runControl.abortCurrentEmbedding = undefined;
+    }
 
     if (r.ok) {
       if (onBatchSuccess) {
@@ -318,9 +358,6 @@ async function uploadBatches(
         }
       }
       totalIndexed += r.indexed;
-      for (const item of batches[b]) {
-        uploadedBookmarkIds.add(item.bookmarkId);
-      }
       broadcast({
         type: "INDEX_PROGRESS",
         phase: "upload",
@@ -337,6 +374,7 @@ async function uploadBatches(
     skippedTimeoutBatches += 1;
     if (isManualSkipError(reason) || runControl.requestSkipCurrent) {
       runControl.requestSkipCurrent = false;
+      await onManualSkip?.(batches[b]);
       broadcast({
         type: "INDEX_PROGRESS",
         phase: "upload",
@@ -368,7 +406,7 @@ async function uploadBatches(
     });
   }
   runControl.abortCurrentEmbedding = undefined;
-  return { indexed: totalIndexed, uploadedBookmarkIds, skippedTimeoutBatches };
+  return { indexed: totalIndexed, skippedTimeoutBatches };
 }
 
 async function runFullIndex(): Promise<void> {
@@ -391,32 +429,24 @@ async function runFullIndex(): Promise<void> {
     });
     const items = await buildAllItems(settings, flat);
     await clearLocalRagVectors();
-    const { indexed, error, uploadedBookmarkIds } = await uploadBatches(
+    const state: IndexStateMap = {};
+    await saveIndexState(state);
+    const { indexed, error } = await uploadBatches(
       settings,
       items,
       async (batch, result) => {
         // Full index clears the local store before upload; only insert vectors here.
         await putLocalRagVectors(toLocalRagRecords(result));
+        await checkpointItems(state, batch);
       },
-      runControl
+      runControl,
+      async (batch) => {
+        await checkpointItems(state, batch);
+      }
     );
     if (error) {
       broadcast({ type: "INDEX_DONE", ok: false, indexed, error });
       return;
-    }
-    const state: IndexStateMap = {};
-    for (let i = 0; i < flat.length; i++) {
-      const bm = flat[i];
-      if (!uploadedBookmarkIds.has(bm.id)) continue;
-      const item = items[i];
-      const text = item?.text || "";
-      const contentHash = await hashContent(bm.url, bm.title, text);
-      state[bm.id] = {
-        url: bm.url,
-        title: bm.title,
-        contentHash,
-        lastIndexedAt: Date.now(),
-      };
     }
     await saveIndexState(state);
     broadcast({ type: "INDEX_DONE", ok: true, indexed });
@@ -520,37 +550,26 @@ async function runIncrementalIndex(): Promise<void> {
     await deleteLocalRagVectorsByBookmarkIds(removedBookmarkIds);
     // Delete changed bookmark vectors once up-front; per-batch callback only inserts.
     await deleteLocalRagVectorsByBookmarkIds(toUpload.map((bm) => bm.id));
-    const { indexed, error, uploadedBookmarkIds } = await uploadBatches(
-      settings,
-      items,
-      async (_batch, result) => {
-        await putLocalRagVectors(toLocalRagRecords(result));
-      },
-      runControl
-    );
-    if (error) {
-      broadcast({ type: "INDEX_DONE", ok: false, indexed, error });
-      return;
-    }
-
     const state: IndexStateMap = { ...prev };
     for (const id of removedBookmarkIds) {
       delete state[id];
     }
-    for (const bm of flat) {
-      const old = prev[bm.id];
-      if (!old || old.url !== bm.url) {
-        if (!uploadedBookmarkIds.has(bm.id)) continue;
-        const item = items.find((it) => it.bookmarkId === bm.id);
-        const text = item?.text || "";
-        const contentHash = await hashContent(bm.url, bm.title, text);
-        state[bm.id] = {
-          url: bm.url,
-          title: bm.title,
-          contentHash,
-          lastIndexedAt: Date.now(),
-        };
+    await saveIndexState(state);
+    const { indexed, error } = await uploadBatches(
+      settings,
+      items,
+      async (batch, result) => {
+        await putLocalRagVectors(toLocalRagRecords(result));
+        await checkpointItems(state, batch);
+      },
+      runControl,
+      async (batch) => {
+        await checkpointItems(state, batch);
       }
+    );
+    if (error) {
+      broadcast({ type: "INDEX_DONE", ok: false, indexed, error });
+      return;
     }
 
     await saveIndexState(state);

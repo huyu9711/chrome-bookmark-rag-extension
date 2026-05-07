@@ -245,29 +245,43 @@ async function requestEmbeddings(
 ): Promise<{ ok: boolean; vectors: number[][]; error?: string }> {
   const url = ragEmbeddingsUrl(settings);
   let res: Response;
+  let text = "";
   const hardTimeoutMs = timeoutMs + 5_000;
   const controller = new AbortController();
+  let timeoutFired = false;
   const onExternalAbort = () => controller.abort();
   if (externalSignal) {
     if (externalSignal.aborted) controller.abort();
     else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
   }
-  const softTimer = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutTimer = setTimeout(() => {
+    timeoutFired = true;
+    controller.abort();
+  }, timeoutMs);
   try {
-    res = await withHardTimeout(
-      fetch(url, {
-        method: "POST",
-        headers: headers(settings.ragApiKey),
-        body: JSON.stringify({
-          model: settings.ragModel,
-          input,
-          ...EMBEDDING_EXTRA,
-        }),
-        signal: controller.signal,
-      }),
+    const response = await withHardTimeout(
+      (async () => {
+        const fetched = await fetch(url, {
+          method: "POST",
+          headers: headers(settings.ragApiKey),
+          body: JSON.stringify({
+            model: settings.ragModel,
+            input,
+            ...EMBEDDING_EXTRA,
+          }),
+          signal: controller.signal,
+        });
+        const body = await fetched.text();
+        return { fetched, body };
+      })(),
       hardTimeoutMs,
-      () => controller.abort()
+      () => {
+        timeoutFired = true;
+        controller.abort();
+      }
     );
+    res = response.fetched;
+    text = response.body;
   } catch (e) {
     if (externalSignal?.aborted) {
       return {
@@ -276,7 +290,7 @@ async function requestEmbeddings(
         error: "Embeddings request aborted by user",
       };
     }
-    if (isAbortError(e) || hasTimeoutLikeMessage(e)) {
+    if (timeoutFired || isAbortError(e) || hasTimeoutLikeMessage(e)) {
       return {
         ok: false,
         vectors: [],
@@ -289,24 +303,10 @@ async function requestEmbeddings(
       error: e instanceof Error ? e.message : String(e),
     };
   } finally {
-    clearTimeout(softTimer);
+    clearTimeout(timeoutTimer);
     if (externalSignal) {
       externalSignal.removeEventListener("abort", onExternalAbort);
     }
-  }
-  let text = "";
-  try {
-    text = await withHardTimeout(res.text(), hardTimeoutMs, () => controller.abort());
-  } catch (e) {
-    return {
-      ok: false,
-      vectors: [],
-      error: hasTimeoutLikeMessage(e)
-        ? `Embeddings response read timed out after ${Math.round(hardTimeoutMs / 1000)}s`
-        : e instanceof Error
-          ? e.message
-          : String(e),
-    };
   }
   let data: unknown;
   try {
